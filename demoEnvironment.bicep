@@ -28,6 +28,20 @@ resource mainVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
           addressPrefix: '10.0.2.0/26'
         }
       }
+      {
+        name: 'vnetIntegration'
+        properties: {
+          addressPrefix: '10.0.3.0/24'
+          delegations: [
+            {
+              name: 'vnetInt'
+              properties: {
+                serviceName: 'Microsoft.Web/serverFarms'
+              }
+            }
+          ]
+        }
+      }
     ]
   }
 }
@@ -49,20 +63,6 @@ resource extVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
         }
       }
     ]
-    virtualNetworkPeerings: [
-      {
-        name: 'ext2main'
-        properties: {
-          allowVirtualNetworkAccess: true
-          allowForwardedTraffic: true
-          allowGatewayTransit: true
-          useRemoteGateways: false
-          remoteVirtualNetwork: {
-            id: mainVnet.id
-          }
-        }
-      }
-    ]
     dhcpOptions: {
       dnsServers: [
         dnsFwVm.outputs.ipAddress
@@ -71,7 +71,7 @@ resource extVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
   }
 }
 
-resource peering 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-07-01' = {
+resource peeringMain 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2021-03-01' = {
   name: 'main2ext'
   parent: mainVnet
   properties: {
@@ -81,6 +81,20 @@ resource peering 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-
     useRemoteGateways: false
     remoteVirtualNetwork: {
       id: extVnet.id
+    }
+  }
+}
+
+resource peeringExt 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2021-03-01' = {
+  name: 'ext2main'
+  parent: extVnet
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: true
+    allowGatewayTransit: true
+    useRemoteGateways: false
+    remoteVirtualNetwork: {
+      id: mainVnet.id
     }
   }
 }
@@ -163,9 +177,9 @@ resource sqlServerDatabase 'Microsoft.Sql/servers/databases@2014-04-01' = {
   name: 'demoDB'
   location: resourceGroup().location
   properties: {
-    collation: 'SQL_Latin1_CP1_CI_AS'
+    collation: 'Latin1_General_CI_AS'
     edition: 'Basic'
-    maxSizeBytes: '10000000'
+    maxSizeBytes: '104857600'
     requestedServiceObjectiveName: 'Basic'
   }
 }
@@ -228,5 +242,64 @@ resource pDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@
         }
       }
     ]
+  }
+}
+
+// FunctionApp
+resource appServicePlan 'Microsoft.Web/serverfarms@2020-12-01' = {
+  name: 'StdPlan'
+  location: resourceGroup().location
+  sku: {
+    name:'S1'
+    capacity: 1
+  }
+}
+
+
+resource azureFunction 'Microsoft.Web/sites@2020-12-01' = {
+  name: 'demoFunctionApp-${uniqueString(resourceGroup().id)}'
+  location: resourceGroup().location
+  kind: 'functionapp'
+  properties: {
+    serverFarmId: appServicePlan.id
+    virtualNetworkSubnetId: mainVnet.properties.subnets[3].id
+    siteConfig: {
+      appSettings: [
+        {
+          name: 'AzureWebJobsStorage'
+          value: 'DefaultEndpointsProtocol=https;AccountName=${storageaccount.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${listKeys(storageaccount.id, storageaccount.apiVersion).keys[0].value}'
+        }        
+        {
+          name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING'
+          value: 'DefaultEndpointsProtocol=https;AccountName=${storageaccount.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${listKeys(storageaccount.id, storageaccount.apiVersion).keys[0].value}'
+        }
+        {
+          name: 'FUNCTIONS_EXTENSION_VERSION'
+          value: '~3'
+        }
+        {
+          name: 'FUNCTIONS_WORKER_RUNTIME'
+          value: 'powershell'
+        }
+        {
+          name: 'FUNCTIONS_WORKER_RUNTIME_VERSION' 
+          value: '~7'
+        }
+        {
+          name: 'WEBSITE_VNET_ROUTE_ALL'
+          value: '1'
+        }
+      ]
+    }
+  }
+}
+
+resource codeSource 'Microsoft.Web/sites/sourcecontrols@2021-02-01' = {
+  name: 'web'
+  parent: azureFunction
+  properties: {
+    repoUrl: 'https://github.com/OmegaMadLab/SampleAzFunction'
+    branch: 'main'
+    isManualIntegration: true 
   }
 }
