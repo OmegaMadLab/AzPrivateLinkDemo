@@ -65,7 +65,7 @@ resource extVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
     ]
     dhcpOptions: {
       dnsServers: [
-        dnsFwVm.outputs.ipAddress
+        dnsFwVmModule.outputs.ipAddress
       ]
     }
   }
@@ -104,19 +104,38 @@ param VmAdmin string
 param VmAdminPwd string
 
 // DNS forwarder VM
-module dnsFwVm 'vmModule.bicep' = {
-  name: 'dnsFwVm'
+module dnsFwVmModule 'vmModule.bicep' = {
+  name: 'DnsForwarder-VM'
   params: {
     subnetId: mainVnet.properties.subnets[0].id
     vmPrefix: 'DnsForwarder'
     VmAdmin: VmAdmin
     VmAdminPwd: VmAdminPwd
+    lbBePoolid: ilb.properties.backendAddressPools[0].id
+  }
+}
+
+resource dnsFwVm 'Microsoft.Compute/virtualMachines@2021-07-01' existing = {
+  name: dnsFwVmModule.name
+}
+
+resource cse 'Microsoft.Compute/virtualMachines/extensions@2021-07-01' = {
+  parent: dnsFwVm
+  name: 'CustomScriptExtension'
+  location: resourceGroup().location
+  properties: {
+    publisher: 'Microsoft.Compute'
+    type: 'CustomScriptExtension'
+    typeHandlerVersion: '1.4'
+    settings: {
+      commandToExecute: 'powershell -NoProfile -Command {${loadTextContent('customScriptExtension.ps1')}}'
+    }
   }
 }
 
 // ExtVnet VM
-module extVm 'vmModule.bicep' = {
-  name: 'extVm'
+module extVmModule 'vmModule.bicep' = {
+  name: 'External-VM'
   params: {
     subnetId: extVnet.properties.subnets[0].id
     vmPrefix: 'External'
@@ -303,3 +322,113 @@ resource codeSource 'Microsoft.Web/sites/sourcecontrols@2021-02-01' = {
     isManualIntegration: true 
   }
 }
+
+// Private link service demo
+resource customerVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
+  name: 'CustomerVnet'
+  location: resourceGroup().location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.0.0.0/16'
+      ]
+    }
+    subnets: [
+      {
+        name: 'Subnet-1'
+        properties: {
+          addressPrefix: '10.0.0.0/24'
+        }
+      }
+    ]
+  }
+}
+
+module customerVmModule 'vmModule.bicep' = {
+  name: 'Customer-VM'
+  params: {
+    subnetId: customerVnet.properties.subnets[0].id
+    vmPrefix: 'Customer'
+    VmAdmin: VmAdmin
+    VmAdminPwd: VmAdminPwd
+  }
+}
+
+resource ilb 'Microsoft.Network/loadBalancers@2020-11-01' = {
+  name: 'Demo-ILB'
+  location: resourceGroup().location
+  properties: {
+    frontendIPConfigurations: [
+      {
+        name: 'frontendConfig'
+        properties: {
+          privateIPAllocationMethod: 'Dynamic'
+          subnet: {
+            id: mainVnet.properties.subnets[0].id
+          }
+        }
+      }
+    ]
+    backendAddressPools: [
+      {
+        name: 'backendConfig'
+      }
+    ]
+    loadBalancingRules: [
+      {
+        name: 'httpTraffic'
+        properties: {
+          frontendIPConfiguration: {
+            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/frontendIpConfigurations/frontendConfig'
+          }
+          backendAddressPool: {
+            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/backendAddressPools/backendConfig'
+          }
+          protocol: 'Tcp'
+          frontendPort: 80
+          backendPort: 80
+          enableFloatingIP: false
+          idleTimeoutInMinutes: 5
+          probe: {
+            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/probes/probe'
+          }
+        }
+      }
+      {
+        name: 'ftpTraffic'
+        properties: {
+          frontendIPConfiguration: {
+            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/frontendIpConfigurations/frontendConfig'
+          }
+          backendAddressPool: {
+            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/backendAddressPools/backendConfig'
+          }
+          protocol: 'Tcp'
+          frontendPort: 21
+          backendPort: 21
+          enableFloatingIP: false
+          idleTimeoutInMinutes: 5
+          probe: {
+            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/probes/probe'
+          }
+        }
+      }
+    ]
+    probes: [
+      {
+        name: 'probe'
+        properties: {
+          protocol: 'Tcp'
+          port: 80
+          intervalInSeconds: 5
+          numberOfProbes: 2
+        }
+      }
+    ]
+  }
+}
+
+
+
+
+

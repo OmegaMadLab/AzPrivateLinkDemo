@@ -4,8 +4,14 @@ param VmAdminPwd string
 param vmPrefix string
 param subnetId string
 param location string = resourceGroup().location
+param lbBePoolid string = ''
+
+var lbBePoolBlock = lbBePoolid == '' ? [] : [{
+  id: lbBePoolid
+}
+]
  
-resource dnsFw 'Microsoft.Compute/virtualMachines@2020-12-01' = {
+resource vm 'Microsoft.Compute/virtualMachines@2020-12-01' = {
   name: '${vmPrefix}-VM'
   location: location
   properties: {
@@ -58,9 +64,10 @@ resource nic 'Microsoft.Network/networkInterfaces@2020-11-01' = {
           subnet: {
             id: subnetId
           }
+          loadBalancerBackendAddressPools: lbBePoolBlock
         }
       }
-    ]
+    ] 
   }
 }
 
@@ -74,3 +81,5 @@ resource stg 'Microsoft.Storage/storageAccounts@2021-02-01' = {
 }
 
 output ipAddress string = nic.properties.ipConfigurations[0].properties.privateIPAddress
+output nicName string = nic.name
+output vmName string = vm.name
