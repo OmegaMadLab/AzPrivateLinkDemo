@@ -20,6 +20,7 @@ resource mainVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
         properties: {
           addressPrefix: '10.0.1.0/24'
           privateEndpointNetworkPolicies: 'Disabled'
+          privateLinkServiceNetworkPolicies: 'Disabled'
         }
       }
       {
@@ -126,9 +127,14 @@ resource cse 'Microsoft.Compute/virtualMachines/extensions@2021-07-01' = {
   properties: {
     publisher: 'Microsoft.Compute'
     type: 'CustomScriptExtension'
-    typeHandlerVersion: '1.4'
+    typeHandlerVersion: '1.9'
     settings: {
-      commandToExecute: 'powershell -NoProfile -Command {${loadTextContent('customScriptExtension.ps1')}}'
+      fileUris: [
+        'https://raw.githubusercontent.com/OmegaMadLab/AzPrivateLinkDemo/main/customScriptExtension.ps1'
+      ]
+    }
+    protectedSettings: {
+      commandToExecute: 'powershell -ExecutionPolicy Unrestricted -File CustomScriptExtension.ps1'
     }
   }
 }
@@ -330,14 +336,21 @@ resource customerVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
   properties: {
     addressSpace: {
       addressPrefixes: [
-        '10.0.0.0/16'
+        '192.168.0.0/23'
       ]
     }
     subnets: [
       {
         name: 'Subnet-1'
         properties: {
-          addressPrefix: '10.0.0.0/24'
+          addressPrefix: '192.168.0.0/24'
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+      {
+        name: 'AzureBastionSubnet'
+        properties: {
+          addressPrefix: '192.168.1.0/26'
         }
       }
     ]
@@ -357,6 +370,9 @@ module customerVmModule 'vmModule.bicep' = {
 resource ilb 'Microsoft.Network/loadBalancers@2020-11-01' = {
   name: 'Demo-ILB'
   location: resourceGroup().location
+  sku: {
+    name: 'Standard'
+  }
   properties: {
     frontendIPConfigurations: [
       {
@@ -394,25 +410,6 @@ resource ilb 'Microsoft.Network/loadBalancers@2020-11-01' = {
           }
         }
       }
-      {
-        name: 'ftpTraffic'
-        properties: {
-          frontendIPConfiguration: {
-            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/frontendIpConfigurations/frontendConfig'
-          }
-          backendAddressPool: {
-            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/backendAddressPools/backendConfig'
-          }
-          protocol: 'Tcp'
-          frontendPort: 21
-          backendPort: 21
-          enableFloatingIP: false
-          idleTimeoutInMinutes: 5
-          probe: {
-            id: '${resourceId('Microsoft.Network/loadBalancers', 'Demo-ILB')}/probes/probe'
-          }
-        }
-      }
     ]
     probes: [
       {
@@ -428,7 +425,81 @@ resource ilb 'Microsoft.Network/loadBalancers@2020-11-01' = {
   }
 }
 
+resource pLinkSvc 'Microsoft.Network/privateLinkServices@2021-03-01' = {
+  name: 'PLINKSVC-DEMO'
+  location: resourceGroup().location
+  properties: {
+    enableProxyProtocol: false
+    loadBalancerFrontendIpConfigurations: [
+      {
+        id: ilb.properties.frontendIPConfigurations[0].id
+      }
+    ]
+    ipConfigurations: [
+      {
+        name: 'serviceProvider-1'
+        properties: {
+          privateIPAllocationMethod: 'Dynamic'
+          privateIPAddressVersion: 'IPv4'
+          subnet: {
+            id: mainVnet.properties.subnets[1].id
+          }
+          primary: false
+        }
+      }
+    ]
+  }
+}
 
+resource pEndpointCustomer 'Microsoft.Network/privateEndpoints@2021-03-01' = {
+  name: 'PLINK-EXTSVC'
+  location: resourceGroup().location
+  properties: {
+    subnet: {
+      id: customerVnet.properties.subnets[0].id
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'PLINK-EXTSVC'
+        properties: {
+          privateLinkServiceId: pLinkSvc.id
+        }
+      }
+    ]
+  }
+}
 
+resource customerBastion 'Microsoft.Network/bastionHosts@2021-02-01' = {
+  name: 'DemoCustomerBastion'
+  location: resourceGroup().location
+  sku: {
+    name: 'Basic'
+  }
+  properties: {
+    dnsName: take('azprivatelinkdemo-customer-${uniqueString(resourceGroup().id)}', 30)
+    ipConfigurations: [
+      {
+        name: 'ipConfig'
+        properties: {
+          publicIPAddress: {
+            id: publicIPAddressCustomer.id
+          }
+          subnet: {
+            id: customerVnet.properties.subnets[1].id
+          }
+        }
+      }
+    ]
+  }
+}
 
-
+resource publicIPAddressCustomer 'Microsoft.Network/publicIPAddresses@2019-11-01' = {
+  name: 'DemoBastion-CustomerPIP'
+  location: resourceGroup().location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+  }
+}
