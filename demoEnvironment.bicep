@@ -503,3 +503,30 @@ resource publicIPAddressCustomer 'Microsoft.Network/publicIPAddresses@2019-11-01
     publicIPAllocationMethod: 'Static'
   }
 }
+
+// NSG
+module nsgIn 'simpleNsgModule.bicep' = {
+  name: 'NSG-Inbound'
+  params: {
+    nsgName: 'NSG-Inbound'
+    ruleName: 'BlockSQL'
+    ruleDescription: 'Block the connectivity to Az SQL via private endpoint on port 1433'
+    targetNicId: pEndpoint.properties.networkInterfaces[0].id
+    destinationPortRange: '1433'
+    access: 'Deny'
+    direction: 'Inbound'
+  }
+}
+
+module nsgOut 'simpleNsgModule.bicep' = {
+  name: 'NSG-Outbound'
+  params: {
+    nsgName: 'NSG-Outbound'
+    ruleName: 'BlockSQL'
+    ruleDescription: 'Block the connectivity to Az SQL via private endpoint on port 1433'
+    targetNicId: pEndpoint.properties.networkInterfaces[0].id
+    destinationPortRange: '1433'
+    access: 'Deny'
+    direction: 'Outbound'
+  }
+}
