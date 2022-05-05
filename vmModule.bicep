@@ -3,12 +3,14 @@ param VmAdmin string
 param VmAdminPwd string
 param vmPrefix string
 param subnetId string
+param staticIp string = ''
 param location string = resourceGroup().location
 param lbBePoolid string = ''
 
-var lbBePoolBlock = lbBePoolid == '' ? [] : [{
-  id: lbBePoolid
-}
+var lbBePoolBlock = lbBePoolid == '' ? [] : [
+  {
+    id: lbBePoolid
+  }
 ]
  
 resource vm 'Microsoft.Compute/virtualMachines@2020-12-01' = {
@@ -60,7 +62,8 @@ resource nic 'Microsoft.Network/networkInterfaces@2020-11-01' = {
       {
         name: 'default'
         properties: {
-          privateIPAllocationMethod: 'Dynamic'
+          privateIPAllocationMethod: staticIp == '' ? 'Dynamic' : 'Static'
+          privateIPAddress: staticIp == '' ? null : staticIp
           subnet: {
             id: subnetId
           }
