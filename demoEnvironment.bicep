@@ -1,7 +1,9 @@
+param location string = resourceGroup().location
+
 // Vnets and peerings
 resource mainVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
   name: 'MainVnet'
-  location: resourceGroup().location
+  location: location
   properties: {
     addressSpace: {
       addressPrefixes: [
@@ -47,29 +49,43 @@ resource mainVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
   }
 }
 
-resource extVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
-  name: 'ExternalVnet'
-  location: resourceGroup().location
-  properties: {
-    addressSpace: {
-      addressPrefixes: [
-        '172.16.0.0/24'
-      ]
-    }
-    subnets: [
-      {
-        name: 'SubnetExt-1'
-        properties: {
-          addressPrefix: '172.16.0.0/24'
-        }
-      }
-    ]
-    dhcpOptions: {
-      dnsServers: [
-        dnsFwVmModule.outputs.ipAddress
-      ]
+var addressPrefixes = [
+  '172.16.0.0/24'
+]
+var subnets = [
+  {
+    name: 'SubnetExt-1'
+    properties: {
+      addressPrefix: '172.16.0.0/24'
     }
   }
+]
+
+module extVnetModule 'vnetModule.bicep' = {
+  name: 'ExternalVnet'
+  params: {
+    location: location
+    addressPrefixes: addressPrefixes
+    name: 'ExternalVnet'
+    subnets: subnets 
+  }
+}
+
+module extVnetWithDnsModule 'vnetModule.bicep' = {
+  name: 'ExternalVnetUpdate'
+  params: {
+    location: location
+    addressPrefixes: addressPrefixes
+    name: 'ExternalVnet'
+    subnets: subnets
+    dnsServers: [
+      extDcVmModule.outputs.ipAddress
+    ]
+  }
+}
+
+resource extVnet 'Microsoft.Network/virtualNetworks@2019-11-01' existing = {
+  name: extVnetModule.name
 }
 
 resource peeringMain 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2021-03-01' = {
@@ -108,6 +124,7 @@ param VmAdminPwd string
 module dnsFwVmModule 'vmModule.bicep' = {
   name: 'DnsForwarder-VM'
   params: {
+    location: location
     subnetId: mainVnet.properties.subnets[0].id
     vmPrefix: 'DnsForwarder'
     VmAdmin: VmAdmin
@@ -123,7 +140,7 @@ resource dnsFwVm 'Microsoft.Compute/virtualMachines@2021-07-01' existing = {
 resource cse 'Microsoft.Compute/virtualMachines/extensions@2021-07-01' = {
   parent: dnsFwVm
   name: 'CustomScriptExtension'
-  location: resourceGroup().location
+  location: location
   properties: {
     publisher: 'Microsoft.Compute'
     type: 'CustomScriptExtension'
@@ -139,22 +156,107 @@ resource cse 'Microsoft.Compute/virtualMachines/extensions@2021-07-01' = {
   }
 }
 
+// ExtVnet DC VM
+module extDcVmModule 'vmModule.bicep' = {
+  name: 'ExternalDC-VM'
+  params: {
+    location: location
+    subnetId: extVnetModule.outputs.subnets[0].id
+    vmPrefix: 'ExternalDC'
+    VmAdmin: VmAdmin
+    VmAdminPwd: VmAdminPwd
+  }
+}
+
+resource extDcVm 'Microsoft.Compute/virtualMachines@2021-07-01' existing = {
+  name: extDcVmModule.name
+}
+
+var adCreateModulesURL = 'https://raw.githubusercontent.com/OmegaMadLab/LabTemplates/master/DSCResources/CreateADDC.ps1.zip'
+var adCreateConfigurationFunction = 'CreateADDC.ps1\\CreateADDC'
+var domainName = 'contoso.com'
+
+resource extDcVm_dsc 'Microsoft.Compute/virtualMachines/extensions@2021-07-01' = {
+  parent: extDcVm
+  name: 'CreateADDC'
+  location: location
+  properties: {
+    publisher: 'Microsoft.Powershell'
+    type: 'DSC'
+    typeHandlerVersion: '2.76'
+    autoUpgradeMinorVersion: false
+    settings: {
+        modulesURL: adCreateModulesURL
+        configurationFunction: adCreateConfigurationFunction
+        properties: {
+            domainName: domainName
+            adminCreds: {
+                userName: VmAdmin
+                password: 'PrivateSettingsRef:adminPassword'
+            }
+        }
+    }
+    protectedSettings: {
+        items: {
+            adminPassword: VmAdminPwd
+        }
+    }
+  }
+}
+
+
+
 // ExtVnet VM
 module extVmModule 'vmModule.bicep' = {
   name: 'External-VM'
   params: {
-    subnetId: extVnet.properties.subnets[0].id
+    location: location
+    subnetId: extVnetWithDnsModule.outputs.subnets[0].id
     vmPrefix: 'External'
     VmAdmin: VmAdmin
     VmAdminPwd: VmAdminPwd
   }
-  
+}
+
+resource extVm 'Microsoft.Compute/virtualMachines@2021-07-01' existing = {
+  name: extVmModule.name
+}
+
+var adJoinModulesURL = 'https://raw.githubusercontent.com/OmegaMadLab/LabTemplates/master/DSCResources/ADDomainJoin.ps1.zip'
+var adJoinConfigurationFunction = 'ADDomainJoin.ps1\\ADDomainJoin'
+
+resource extVm_dsc 'Microsoft.Compute/virtualMachines/extensions@2021-07-01' = {
+  parent: extVm
+  name: 'ADJoin'
+  location: location
+  properties: {
+    publisher: 'Microsoft.Powershell'
+    type: 'DSC'
+    typeHandlerVersion: '2.76'
+    autoUpgradeMinorVersion: false
+    settings: {
+        modulesURL: adJoinModulesURL
+        configurationFunction: adJoinConfigurationFunction
+        properties: {
+            domainName: domainName
+            adminCreds: {
+                userName: VmAdmin
+                password: 'PrivateSettingsRef:adminPassword'
+            }
+        }
+    }
+    protectedSettings: {
+        items: {
+            adminPassword: VmAdminPwd
+        }
+    }
+  }
 }
 
 // Bastion
 resource bastion 'Microsoft.Network/bastionHosts@2021-02-01' = {
   name: 'DemoBastion'
-  location: resourceGroup().location
+  location: location
   sku: {
     name: 'Basic'
   }
@@ -178,7 +280,7 @@ resource bastion 'Microsoft.Network/bastionHosts@2021-02-01' = {
 
 resource publicIPAddress 'Microsoft.Network/publicIPAddresses@2019-11-01' = {
   name: 'DemoBastion-PIP'
-  location: resourceGroup().location
+  location: location
   sku: {
     name: 'Standard'
   }
@@ -190,7 +292,7 @@ resource publicIPAddress 'Microsoft.Network/publicIPAddresses@2019-11-01' = {
 // PaaS resources
 resource sqlServer 'Microsoft.Sql/servers@2014-04-01' ={
   name: take('demosql-${uniqueString(resourceGroup().id)}', 15)
-  location: resourceGroup().location
+  location: location
   properties: {
     administratorLogin: VmAdmin
     administratorLoginPassword: VmAdminPwd
@@ -200,7 +302,7 @@ resource sqlServer 'Microsoft.Sql/servers@2014-04-01' ={
 resource sqlServerDatabase 'Microsoft.Sql/servers/databases@2014-04-01' = {
   parent: sqlServer
   name: 'demoDB'
-  location: resourceGroup().location
+  location: location
   properties: {
     collation: 'Latin1_General_CI_AS'
     edition: 'Basic'
@@ -211,7 +313,7 @@ resource sqlServerDatabase 'Microsoft.Sql/servers/databases@2014-04-01' = {
 
 resource storageaccount 'Microsoft.Storage/storageAccounts@2021-02-01' = {
   name: toLower(take('demostg${uniqueString(resourceGroup().id)}', 24))
-  location: resourceGroup().location
+  location: location
   kind: 'StorageV2'
   sku: {
     name: 'Standard_LRS'
@@ -221,7 +323,7 @@ resource storageaccount 'Microsoft.Storage/storageAccounts@2021-02-01' = {
 // Private endpoint and related resources for AzSQL
 resource pEndpoint 'Microsoft.Network/privateEndpoints@2021-03-01' = {
   name: 'DemoSQL-PLINK'
-  location: resourceGroup().location
+  location: location
   properties: {
     subnet: {
       id: mainVnet.properties.subnets[1].id
@@ -273,7 +375,7 @@ resource pDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@
 // FunctionApp
 resource appServicePlan 'Microsoft.Web/serverfarms@2020-12-01' = {
   name: 'StdPlan'
-  location: resourceGroup().location
+  location: location
   sku: {
     name:'S1'
     capacity: 1
@@ -283,7 +385,7 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2020-12-01' = {
 
 resource azureFunction 'Microsoft.Web/sites@2020-12-01' = {
   name: 'demoFunctionApp-${uniqueString(resourceGroup().id)}'
-  location: resourceGroup().location
+  location: location
   kind: 'functionapp'
   properties: {
     serverFarmId: appServicePlan.id
@@ -332,7 +434,7 @@ resource codeSource 'Microsoft.Web/sites/sourcecontrols@2021-02-01' = {
 // Private link service demo
 resource customerVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
   name: 'CustomerVnet'
-  location: resourceGroup().location
+  location: location
   properties: {
     addressSpace: {
       addressPrefixes: [
@@ -360,6 +462,7 @@ resource customerVnet 'Microsoft.Network/virtualNetworks@2019-11-01' = {
 module customerVmModule 'vmModule.bicep' = {
   name: 'Customer-VM'
   params: {
+    location: location
     subnetId: customerVnet.properties.subnets[0].id
     vmPrefix: 'Customer'
     VmAdmin: VmAdmin
@@ -369,7 +472,7 @@ module customerVmModule 'vmModule.bicep' = {
 
 resource ilb 'Microsoft.Network/loadBalancers@2020-11-01' = {
   name: 'Demo-ILB'
-  location: resourceGroup().location
+  location: location
   sku: {
     name: 'Standard'
   }
@@ -427,7 +530,7 @@ resource ilb 'Microsoft.Network/loadBalancers@2020-11-01' = {
 
 resource pLinkSvc 'Microsoft.Network/privateLinkServices@2021-03-01' = {
   name: 'PLINKSVC-DEMO'
-  location: resourceGroup().location
+  location: location
   properties: {
     enableProxyProtocol: false
     loadBalancerFrontendIpConfigurations: [
@@ -453,7 +556,7 @@ resource pLinkSvc 'Microsoft.Network/privateLinkServices@2021-03-01' = {
 
 resource pEndpointCustomer 'Microsoft.Network/privateEndpoints@2021-03-01' = {
   name: 'PLINK-EXTSVC'
-  location: resourceGroup().location
+  location: location
   properties: {
     subnet: {
       id: customerVnet.properties.subnets[0].id
@@ -471,7 +574,7 @@ resource pEndpointCustomer 'Microsoft.Network/privateEndpoints@2021-03-01' = {
 
 resource customerBastion 'Microsoft.Network/bastionHosts@2021-02-01' = {
   name: 'DemoCustomerBastion'
-  location: resourceGroup().location
+  location: location
   sku: {
     name: 'Basic'
   }
@@ -495,7 +598,7 @@ resource customerBastion 'Microsoft.Network/bastionHosts@2021-02-01' = {
 
 resource publicIPAddressCustomer 'Microsoft.Network/publicIPAddresses@2019-11-01' = {
   name: 'DemoBastion-CustomerPIP'
-  location: resourceGroup().location
+  location: location
   sku: {
     name: 'Standard'
   }
@@ -508,6 +611,7 @@ resource publicIPAddressCustomer 'Microsoft.Network/publicIPAddresses@2019-11-01
 module nsgIn 'simpleNsgModule.bicep' = {
   name: 'NSG-Inbound'
   params: {
+    location: location
     nsgName: 'NSG-Inbound'
     ruleName: 'BlockSQL'
     ruleDescription: 'Block the connectivity to Az SQL via private endpoint on port 1433'
@@ -521,6 +625,7 @@ module nsgIn 'simpleNsgModule.bicep' = {
 module nsgOut 'simpleNsgModule.bicep' = {
   name: 'NSG-Outbound'
   params: {
+    location: location
     nsgName: 'NSG-Outbound'
     ruleName: 'BlockSQL'
     ruleDescription: 'Block the connectivity to Az SQL via private endpoint on port 1433'
